@@ -17,6 +17,8 @@ Parameters:
       - stage
       - prod
     Default: dev
+  SENDEREMAIL:
+    Type: String
 
 Globals:
   Function:
@@ -34,6 +36,7 @@ Resources:
       Description: Base layer for task reminder(Contains updated boto3 library)
       ContentUri: base/
       RetentionPolicy: Retain
+
   SchedulerFunction:
     Type: AWS::Serverless::Function # More info about Function Resource: https://github.com/awslabs/serverless-application-model/blob/master/versions/2016-10-31.md#awsserverlessfunction
     Properties:
@@ -46,8 +49,8 @@ Resources:
             Method: post
       Environment:
         Variables:
-          SEND_REMINDER_FUNCTION: !GetAtt SendReminderFunction.Arn
-          INVOKE_LAMBDA_SCHEDULER_ROLE: !GetAtt InvokeLambdaSchedulerRole.Arn
+          SEND_MESSAGE_TO_QUEUE_ROLE: !GetAtt SendMessageToQueueRole.Arn
+          TASK_QUEUE: !GetAtt TasksQueue.Arn
       Policies:
         - Statement:
             - Sid: CreateEventSchedulePolicy
@@ -59,11 +62,11 @@ Resources:
             - Effect: Allow
               Action:
                 - iam:PassRole
-              Resource: !GetAtt InvokeLambdaSchedulerRole.Arn
+              Resource: !GetAtt SendMessageToQueueRole.Arn
       Layers:
         - !Ref BaseDependenciesLayer
 
-  InvokeLambdaSchedulerRole:
+  SendMessageToQueueRole:
     Type: AWS::IAM::Role
     Properties:
       AssumeRolePolicyDocument:
@@ -75,36 +78,54 @@ Resources:
             Action:
               - sts:AssumeRole
       Policies:
-        - PolicyName: invoke-lambda-policy
+        - PolicyName: send-message-to-sqs-policy
           PolicyDocument:
             Statement:
               - Effect: Allow
                 Action:
-                  - lambda:InvokeFunction
-                Resource: !GetAtt SendReminderFunction.Arn
-
+                  - sqs:SendMessage
+                Resource: !GetAtt TasksQueue.Arn
+          
   SendReminderFunction:
     Type: AWS::Serverless::Function
     Properties:
       CodeUri: send_reminder/
       Environment:
         Variables:
-          TASK_REMINDER_TOPIC: !Ref TaskReminderTopic
-          TASK_QUEUE: !Ref TasksQueue
+          TASK_QUEUE: !GetAtt TasksQueue.Arn
+          SENDER_EMAIL: !Ref SENDEREMAIL
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action:
+                - ses:SendEmail
+                - sqs:ReceiveMessage
+                - sqs:DeleteMessage
+                - sqs:GetQueueAttributes
+                - scheduler:DeleteSchedule
+              Resource: "*"
+      Layers:
+        - !Ref BaseDependenciesLayer
 
   TasksQueue:
     Type: AWS::SQS::Queue
     Properties:
       QueueName: !Sub ${Application}-${Environment}-tasks
 
-  TaskReminderTopic:
-    Type: AWS::SNS::Topic
+  SQSEventSourceMapping:
+    Type: AWS::Lambda::EventSourceMapping
+    Properties:
+      BatchSize: 10
+      Enabled: true
+      EventSourceArn: !Ref 
+      FunctionName: !GetAtt SendReminderFunction.Arn
+      EventSourceArn: !GetAtt TasksQueue.Arn
 
 Outputs:
   # ServerlessRestApi is an implicit API created out of Events key under Serverless::Function
   # Find out more about other implicit resources you can reference within SAM
   # https://github.com/awslabs/serverless-application-model/blob/master/docs/internals/generated_resources.rst#api
-  HelloWorldApi:
+  TaskReminderAPI:
     Description: "API Gateway endpoint URL for Prod stage for Scheduler function"
     Value: !Sub "https://${ServerlessRestApi}.execute-api.${AWS::Region}.amazonaws.com/Prod/schedule/"
   SchedulerFunction:
